@@ -18,7 +18,7 @@
 
 ## Prerequisites
 
-- macOS Sonoma 15.7 or later
+- macOS Sonoma 14.7 or later
 - Python 3.12+
 - Homebrew (for installing additional dependencies)
 - cliclick (`brew install cliclick`) - Required for mouse and keyboard control
