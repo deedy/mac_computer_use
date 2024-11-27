@@ -2,22 +2,26 @@ import asyncio
 import base64
 import os
 import shlex
-import pyautogui
-import keyboard
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, TypedDict
 from uuid import uuid4
+from io import BytesIO
+from PIL import Image
 
 from anthropic.types.beta import BetaToolComputerUse20241022Param
 
 from .base import BaseAnthropicTool, ToolError, ToolResult
 from .run import run
 
+# Constants
 OUTPUT_DIR = "/tmp/outputs"
-
 TYPING_DELAY_MS = 12
 TYPING_GROUP_SIZE = 50
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB in bytes
+
+# Check if we're running in a codespace environment
+IS_CODESPACE = os.environ.get("CODESPACES") == "true"
 
 Action = Literal[
     "key",
@@ -63,11 +67,30 @@ def chunks(s: str, chunk_size: int) -> list[str]:
     return [s[i : i + chunk_size] for i in range(0, len(s), chunk_size)]
 
 
+def compress_image(image_data: bytes, max_size: int = MAX_IMAGE_SIZE) -> bytes:
+    """Compress image data until it's under the specified max size."""
+    img = Image.open(BytesIO(image_data))
+    quality = 95
+    output = BytesIO()
+
+    while True:
+        output.seek(0)
+        output.truncate()
+        img.save(output, format="PNG", optimize=True, quality=quality)
+        size = output.tell()
+
+        if size <= max_size or quality <= 5:
+            break
+
+        quality -= 5
+
+    return output.getvalue()
+
+
 class ComputerTool(BaseAnthropicTool):
     """
-    A tool that allows the agent to interact with the screen, keyboard, and mouse of the current macOS computer.
+    A tool that allows the agent to interact with the screen, keyboard, and mouse.
     The tool parameters are defined by Anthropic and are not editable.
-    Requires cliclick to be installed: brew install cliclick
     """
 
     name: Literal["computer"] = "computer"
@@ -76,7 +99,7 @@ class ComputerTool(BaseAnthropicTool):
     height: int
     display_num: int | None
 
-    _screenshot_delay = 1.0  # macOS is generally faster than X11
+    _screenshot_delay = 1.0
     _scaling_enabled = True
 
     @property
@@ -93,9 +116,13 @@ class ComputerTool(BaseAnthropicTool):
     def __init__(self):
         super().__init__()
 
-        self.width, self.height = pyautogui.size()
-        assert self.width and self.height, "WIDTH, HEIGHT must be set"
-        self.display_num = None  # macOS doesn't use X11 display numbers
+        # Set default dimensions
+        self.width = int(os.environ.get("WIDTH", 1366))
+        self.height = int(os.environ.get("HEIGHT", 768))
+        self.display_num = None
+
+        if IS_CODESPACE:
+            print("Running in codespace environment - some features may be limited")
 
     async def __call__(
         self,
@@ -106,6 +133,12 @@ class ComputerTool(BaseAnthropicTool):
         **kwargs,
     ):
         print("Action: ", action, text, coordinate)
+
+        if IS_CODESPACE:
+            return ToolResult(
+                error="This action is not supported in codespace environment. This tool is designed for macOS systems."
+            )
+
         if action in ("mouse_move", "left_click_drag"):
             if coordinate is None:
                 raise ToolError(f"coordinate is required for {action}")
@@ -116,7 +149,9 @@ class ComputerTool(BaseAnthropicTool):
             if not all(isinstance(i, int) and i >= 0 for i in coordinate):
                 raise ToolError(f"{coordinate} must be a tuple of non-negative ints")
 
-            x, y = self.scale_coordinates(ScalingSource.API, coordinate[0], coordinate[1])
+            x, y = self.scale_coordinates(
+                ScalingSource.API, coordinate[0], coordinate[1]
+            )
 
             if action == "mouse_move":
                 return await self.shell(f"cliclick m:{x},{y}")
@@ -129,45 +164,44 @@ class ComputerTool(BaseAnthropicTool):
             if coordinate is not None:
                 raise ToolError(f"coordinate is not accepted for {action}")
             if not isinstance(text, str):
-                raise ToolError(output=f"{text} must be a string")
+                raise ToolError("Text input must be a string")
 
             if action == "key":
-                # Convert common key names to pyautogui format
+                # Use cliclick for key presses
                 key_map = {
-                    "Return": "enter",
-                    "space": "space",
-                    "Tab": "tab",
-                    "Left": "left",
-                    "Right": "right",
-                    "Up": "up",
-                    "Down": "down",
-                    "Escape": "esc",
-                    "command": "command",
-                    "cmd": "command",
-                    "alt": "alt",
-                    "shift": "shift",
-                    "ctrl": "ctrl"
+                    "Return": "kp:return",
+                    "space": "kp:space",
+                    "Tab": "kp:tab",
+                    "Left": "kp:arrow-left",
+                    "Right": "kp:arrow-right",
+                    "Up": "kp:arrow-up",
+                    "Down": "kp:arrow-down",
+                    "Escape": "kp:esc",
+                    "command": "kp:cmd",
+                    "cmd": "kp:cmd",
+                    "alt": "kp:alt",
+                    "shift": "kp:shift",
+                    "ctrl": "kp:ctrl",
                 }
 
                 try:
                     if "+" in text:
                         # Handle combinations like "ctrl+c"
                         keys = text.split("+")
-                        mapped_keys = [key_map.get(k.strip(), k.strip()) for k in keys]
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, keyboard.press_and_release, '+'.join(mapped_keys)
-                        )
+                        mapped_keys = [
+                            key_map.get(k.strip(), f"kp:{k.strip()}") for k in keys
+                        ]
+                        cmd = "cliclick " + " ".join(mapped_keys)
                     else:
                         # Handle single keys
-                        mapped_key = key_map.get(text, text)
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, keyboard.press_and_release, mapped_key
-                        )
+                        mapped_key = key_map.get(text, f"kp:{text}")
+                        cmd = f"cliclick {mapped_key}"
 
-                    return ToolResult(output=f"Pressed key: {text}", error=None, base64_image=None)
+                    return await self.shell(cmd)
 
                 except Exception as e:
-                    return ToolResult(output=None, error=str(e), base64_image=None)
+                    return ToolResult(error=str(e))
+
             elif action == "type":
                 results: list[ToolResult] = []
                 for chunk in chunks(text, TYPING_GROUP_SIZE):
@@ -200,7 +234,6 @@ class ComputerTool(BaseAnthropicTool):
                     "cliclick p",
                     take_screenshot=False,
                 )
-                import pdb; pdb.set_trace()
                 if result.output:
                     x, y = map(int, result.output.strip().split(","))
                     x, y = self.scale_coordinates(ScalingSource.COMPUTER, x, y)
@@ -219,26 +252,35 @@ class ComputerTool(BaseAnthropicTool):
 
     async def screenshot(self):
         """Take a screenshot of the current screen and return the base64 encoded image."""
+        if IS_CODESPACE:
+            return ToolResult(
+                error="Screenshot functionality is not available in codespace environment"
+            )
+
         output_dir = Path(OUTPUT_DIR)
         output_dir.mkdir(parents=True, exist_ok=True)
         path = output_dir / f"screenshot_{uuid4().hex}.png"
 
-        # Use macOS native screencapture
-        screenshot_cmd = f"screencapture -x {path}"
-        result = await self.shell(screenshot_cmd, take_screenshot=False)
+        try:
+            # Use screencapture on macOS
+            result = await self.shell(f"screencapture -x {path}")
+            if result.error:
+                return result
 
-        if self._scaling_enabled:
-            x, y = SCALE_DESTINATION['width'], SCALE_DESTINATION['height']
-            await self.shell(
-                f"sips -z {y} {x} {path}",  # sips is macOS native image processor
-                take_screenshot=False
-            )
+            if path.exists():
+                # Read the image and compress if necessary
+                image_data = path.read_bytes()
+                if len(image_data) > MAX_IMAGE_SIZE:
+                    image_data = compress_image(image_data)
 
-        if path.exists():
-            return result.replace(
-                base64_image=base64.b64encode(path.read_bytes()).decode()
-            )
-        raise ToolError(f"Failed to take screenshot: {result.error}")
+                return ToolResult(base64_image=base64.b64encode(image_data).decode())
+            return ToolResult(error="Screenshot file was not created")
+        except Exception as e:
+            return ToolResult(error=f"Failed to take screenshot: {str(e)}")
+        finally:
+            # Clean up the temporary file
+            if path.exists():
+                path.unlink()
 
     async def shell(self, command: str, take_screenshot=False) -> ToolResult:
         """Run a shell command and return the output, error, and optionally a screenshot."""
@@ -252,7 +294,9 @@ class ComputerTool(BaseAnthropicTool):
 
         return ToolResult(output=stdout, error=stderr, base64_image=base64_image)
 
-    def scale_coordinates(self, source: ScalingSource, x: int, y: int) -> tuple[int, int]:
+    def scale_coordinates(
+        self, source: ScalingSource, x: int, y: int
+    ) -> tuple[int, int]:
         """
         Scale coordinates between original resolution and target resolution (SCALE_DESTINATION).
 
@@ -268,13 +312,15 @@ class ComputerTool(BaseAnthropicTool):
             return x, y
 
         # Calculate scaling factors
-        x_scaling_factor = SCALE_DESTINATION['width'] / self.width
-        y_scaling_factor = SCALE_DESTINATION['height'] / self.height
+        x_scaling_factor = SCALE_DESTINATION["width"] / self.width
+        y_scaling_factor = SCALE_DESTINATION["height"] / self.height
 
         if source == ScalingSource.API:
             # Scale up from SCALE_DESTINATION to original resolution
-            if x > SCALE_DESTINATION['width'] or y > SCALE_DESTINATION['height']:
-                raise ToolError(f"Coordinates {x}, {y} are out of bounds for {SCALE_DESTINATION['width']}x{SCALE_DESTINATION['height']}")
+            if x > SCALE_DESTINATION["width"] or y > SCALE_DESTINATION["height"]:
+                raise ToolError(
+                    f"Coordinates {x}, {y} are out of bounds for {SCALE_DESTINATION['width']}x{SCALE_DESTINATION['height']}"
+                )
             return round(x / x_scaling_factor), round(y / y_scaling_factor)
         else:
             # Scale down from original resolution to SCALE_DESTINATION

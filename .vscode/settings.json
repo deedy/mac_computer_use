@@ -1,0 +1,10 @@
+{
+  "inlineChat.finishOnType": true,
+  "inlineChat.experimental.enableZoneToolbar": true,
+  "accessibility.voice.keywordActivation": "chatInContext",
+  "github.copilot.chat.experimental.inlineChatCompletionTrigger.enabled": true,
+  "github.copilot.chat.experimental.inlineChatHint.enabled": true,
+  "gitlens.ai.experimental.model": "anthropic:claude-3-5-sonnet-20240620",
+  "gitlens.ai.experimental.openai.url": "",
+  "diffEditor.codeLens": true
+}
