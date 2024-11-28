@@ -1,9 +1,36 @@
-streamlit>=1.38.0
-anthropic[bedrock,vertex]>=0.37.1
-jsonschema==4.22.0
-keyboard>=0.13.5
-boto3>=1.28.57
-google-auth<3,>=2
+streamlit>=1.32.0
+anthropic[bedrock,vertex]>=0.8.1
+jsonschema>=4.21.1
 python-dotenv>=1.0.1
+loguru>=0.7.2
+
+# System interaction
+keyboard>=0.13.5
 pyautogui>=0.9.54
-watchdog>=5.0.3
+psutil>=5.9.0
+watchdog>=3.0.0
+
+# macOS System Integration
+pyobjc-core>=9.2
+pyobjc-framework-Cocoa>=9.2
+pyobjc-framework-Quartz>=9.2
+pyobjc-framework-Vision>=9.2
+pyobjc-framework-ApplicationServices>=9.2
+
+# Caching and Rate Limiting
+redis>=5.0.1
+
+# New productivity additions
+pyperclip>=1.8.2
+pynput>=1.7.6
+schedule>=1.1.0
+
+# Cursor Integration
+cursor-app>=0.40.3
+pyobjc-framework-ApplicationServices>=9.2
+pyautogui>=0.9.54
+keyboard>=0.13.5
+
+# GUI Enhancements
+customtkinter>=5.2.0
+darkdetect>=0.8.0

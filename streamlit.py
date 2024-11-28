@@ -1,360 +1,457 @@
-"""
-Entrypoint for streamlit, see https://docs.streamlit.io/
-"""
+"""Streamlit UI for computer use tools."""
 
+import os
+import sys
 import asyncio
 import base64
-import os
-import subprocess
-from datetime import datetime
-from enum import StrEnum
-from functools import partial
-from pathlib import PosixPath
-from typing import cast
+from typing import Optional
+from pathlib import Path
+from datetime import datetime, timedelta
+
+# Add the parent directory to Python path
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
 
 import streamlit as st
-from anthropic import APIResponse
-from anthropic.types import (
-    TextBlock,
-)
-from anthropic.types.beta import BetaMessage, BetaTextBlock, BetaToolUseBlock
-from anthropic.types.tool_use_block import ToolUseBlock
-from streamlit.delta_generator import DeltaGenerator
+from loguru import logger
 
-from loop import (
-    PROVIDER_TO_DEFAULT_MODEL_NAME,
-    APIProvider,
-    sampling_loop,
-)
-from tools import ToolResult
-from dotenv import load_dotenv
-
-load_dotenv()
+from computer_use.tools.collection import ToolCollection
+from computer_use.tools.bash import BashTool
+from computer_use.tools.computer import ComputerTool
+from computer_use.tools.edit import EditTool
+from computer_use.tools.base_tool import ToolResult
+from computer_use.tools.productivity import ProductivityManager
+from computer_use.tools.cursor_integration import CursorIntegration
 
 
-CONFIG_DIR = PosixPath("~/.anthropic").expanduser()
-API_KEY_FILE = CONFIG_DIR / "api_key"
-STREAMLIT_STYLE = """
-<style>
-    /* Hide chat input while agent loop is running */
-    .stApp[data-teststate=running] .stChatInput textarea,
-    .stApp[data-test-script-state=running] .stChatInput textarea {
-        display: none;
-    }
-     /* Hide the streamlit deploy button */
-    .stDeployButton {
-        visibility: hidden;
-    }
-</style>
-"""
-
-WARNING_TEXT = ""
+def format_duration(duration: timedelta) -> str:
+    """Format timedelta into readable string."""
+    total_seconds = int(duration.total_seconds())
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-class Sender(StrEnum):
-    USER = "user"
-    BOT = "assistant"
-    TOOL = "tool"
+def load_from_storage(key: str) -> Optional[str]:
+    """Load value from storage."""
+    try:
+        storage_dir = Path.home() / ".config" / "mac_computer_use"
+        if not storage_dir.exists():
+            return None
+            
+        file_path = storage_dir / f"{key}.txt"
+        if not file_path.exists():
+            return None
+            
+        with open(file_path) as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.error(f"Failed to load {key}: {e}")
+        return None
 
 
-def setup_state():
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "api_key" not in st.session_state:
-        # Try to load API key from file first, then environment
-        st.session_state.api_key = load_from_storage("api_key") or os.getenv(
-            "ANTHROPIC_API_KEY", ""
-        )
-    if "provider" not in st.session_state:
-        st.session_state.provider = (
-            os.getenv("API_PROVIDER", "anthropic") or APIProvider.ANTHROPIC
-        )
-    if "provider_radio" not in st.session_state:
-        st.session_state.provider_radio = st.session_state.provider
-    if "model" not in st.session_state:
-        _reset_model()
-    if "auth_validated" not in st.session_state:
-        st.session_state.auth_validated = False
-    if "responses" not in st.session_state:
-        st.session_state.responses = {}
+def save_to_storage(key: str, value: str):
+    """Save value to storage."""
+    try:
+        storage_dir = Path.home() / ".config" / "mac_computer_use"
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        
+        with open(storage_dir / f"{key}.txt", "w") as f:
+            f.write(value)
+    except Exception as e:
+        logger.error(f"Failed to save {key}: {e}")
+
+
+def init_session_state():
+    """Initialize session state with default values."""
+    if "initialized" not in st.session_state:
+        st.session_state.initialized = False
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = base64.urlsafe_b64encode(os.urandom(9)).decode()
     if "tools" not in st.session_state:
-        st.session_state.tools = {}
-    if "only_n_most_recent_images" not in st.session_state:
-        st.session_state.only_n_most_recent_images = 10
-    if "custom_system_prompt" not in st.session_state:
-        st.session_state.custom_system_prompt = load_from_storage("system_prompt") or ""
-    if "hide_images" not in st.session_state:
-        st.session_state.hide_images = False
+        st.session_state.tools = None
+    if "api_key" not in st.session_state:
+        st.session_state.api_key = load_from_storage("api_key") or os.getenv("ANTHROPIC_API_KEY", "")
+    if "start_time" not in st.session_state:
+        st.session_state.start_time = datetime.now()
+    if "productivity_manager" not in st.session_state:
+        st.session_state.productivity_manager = ProductivityManager()
+    if "cursor" not in st.session_state:
+        st.session_state.cursor = CursorIntegration()
 
 
-def _reset_model():
-    st.session_state.model = PROVIDER_TO_DEFAULT_MODEL_NAME[
-        cast(APIProvider, st.session_state.provider)
-    ]
+async def initialize_session():
+    """Initialize session components and managers."""
+    if not st.session_state.initialized:
+        try:
+            # Initialize tools collection
+            st.session_state.tools = ToolCollection()
+            
+            # Create tool instances
+            bash_tool = BashTool()
+            computer_tool = ComputerTool()
+            edit_tool = EditTool()
+            
+            # Add tools to collection
+            st.session_state.tools.registry.register(bash_tool)
+            st.session_state.tools.registry.register(computer_tool)
+            st.session_state.tools.registry.register(edit_tool)
+            
+            # Initialize tools
+            await st.session_state.tools.initialize()
+            
+            st.session_state.initialized = True
+            logger.info(f"Session initialized with ID: {st.session_state.session_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize session: {e}")
+            st.error("Failed to initialize session. Please refresh the page.")
 
 
-async def main():
-    """Render loop for streamlit"""
-    setup_state()
-
-    st.markdown(STREAMLIT_STYLE, unsafe_allow_html=True)
-
-    st.title("Claude Computer Use for Mac")
-
-    st.markdown("""This is from [Mac Computer Use](https://github.com/deedy/mac_computer_use), a fork of [Anthropic Computer Use](https://github.com/anthropics/anthropic-quickstarts/blob/main/computer-use-demo/README.md) to work natively on Mac.""")
-
+def render_sidebar():
+    """Render sidebar with configuration and session info."""
     with st.sidebar:
-
-        def _reset_api_provider():
-            if st.session_state.provider_radio != st.session_state.provider:
-                _reset_model()
-                st.session_state.provider = st.session_state.provider_radio
-                st.session_state.auth_validated = False
-
-        provider_options = [option.value for option in APIProvider]
-        st.radio(
-            "API Provider",
-            options=provider_options,
-            key="provider_radio",
-            format_func=lambda x: x.title(),
-            on_change=_reset_api_provider,
+        st.markdown('<h1 style="color: #00cf86; margin-bottom: 2rem;">⚙️ Configuration</h1>', unsafe_allow_html=True)
+        
+        # API Key input
+        st.markdown('<div class="api-key">', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🔑 API Key</div>', unsafe_allow_html=True)
+        api_key = st.text_input(
+            "Anthropic API Key",
+            type="password",
+            value=st.session_state.api_key,
+            help="Enter your Anthropic API key"
         )
+        
+        if api_key != st.session_state.api_key:
+            st.session_state.api_key = api_key
+            save_to_storage("api_key", api_key)
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Session Information
+        st.markdown('<div class="session-stats">', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">📊 Session Information</div>', unsafe_allow_html=True)
+        
+        current_time = datetime.now()
+        last_saved = current_time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Session ID", st.session_state.session_id[:8])
+            st.metric("Status", "Active" if st.session_state.initialized else "Initializing")
+        with col2:
+            st.metric("Last Active", last_saved)
+            st.metric("Duration", format_duration(current_time - st.session_state.start_time))
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        st.text_input("Model", key="model")
 
-        if st.session_state.provider == APIProvider.ANTHROPIC:
-            st.text_input(
-                "Anthropic API Key",
-                type="password",
-                key="api_key",
-                on_change=lambda: save_to_storage("api_key", st.session_state.api_key),
-            )
-
-        st.number_input(
-            "Only send N most recent images",
-            min_value=0,
-            key="only_n_most_recent_images",
-            help="To decrease the total tokens sent, remove older screenshots from the conversation",
+def render_productivity_sidebar():
+    with st.sidebar:
+        st.markdown("## 📊 Productivity Stats")
+        
+        stats = st.session_state.productivity_manager.get_productivity_stats()
+        
+        # Active Windows
+        st.markdown("### 🪟 Window Activity")
+        for window, percentage in stats['active_windows'].items():
+            st.progress(percentage / 100, text=f"{window}: {percentage}%")
+            
+        # Time Tracking
+        st.markdown("### ⏱️ Time Tracking")
+        st.metric("Total Active Time (mins)", stats['total_active_time'])
+        st.metric("Current Window", stats['current_window'])
+        
+        # Clipboard
+        st.markdown("### 📋 Clipboard History")
+        st.metric("Saved Items", stats['clipboard_items'])
+        
+        # Controls
+        st.markdown("### ⚙️ Controls")
+        if st.button("Clear History"):
+            st.session_state.productivity_manager.clear_history()
+            st.rerun()
+            
+        break_interval = st.number_input(
+            "Break Interval (mins)",
+            min_value=15,
+            max_value=120,
+            value=45
         )
-        st.text_area(
-            "Custom System Prompt Suffix",
-            key="custom_system_prompt",
-            help="Additional instructions to append to the system prompt. see computer_use_demo/loop.py for the base system prompt.",
-            on_change=lambda: save_to_storage(
-                "system_prompt", st.session_state.custom_system_prompt
-            ),
-        )
-        st.checkbox("Hide screenshots", key="hide_images")
+        if st.button("Schedule Breaks"):
+            st.session_state.productivity_manager.schedule_breaks(break_interval)
+            st.success(f"Breaks scheduled every {break_interval} minutes")
 
-        if st.button("Reset", type="primary"):
-            with st.spinner("Resetting..."):
-                st.session_state.clear()
-                setup_state()
 
-                subprocess.run("pkill Xvfb; pkill tint2", shell=True)  # noqa: ASYNC221
-                await asyncio.sleep(1)
-                subprocess.run("./start_all.sh", shell=True)  # noqa: ASYNC221
+def render_cursor_controls():
+    """Render Cursor-specific controls"""
+    st.markdown("## 🖱️ Cursor Controls")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Launch GUI"):
+            with st.spinner("Launching Cursor..."):
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(st.session_state.cursor.launch_gui())
+                finally:
+                    loop.close()
+                
+    with col2:
+        if st.button("Launch CLI"):
+            with st.spinner("Launching Cursor..."):
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(st.session_state.cursor.launch_cli())
+                finally:
+                    loop.close()
+                
+    # Cursor Settings
+    st.markdown("### ⚙️ Cursor Settings")
+    cursor_width = st.slider("Cursor Width", 1, 10, 2)
+    cursor_color = st.color_picker("Cursor Color", "#00cf86")
+    
+    if st.button("Apply Settings"):
+        settings = {
+            "cursor_width": cursor_width,
+            "cursor_color": cursor_color
+        }
+        with st.spinner("Applying settings..."):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    st.session_state.cursor.configure_cursor(settings)
+                )
+            finally:
+                loop.close()
 
-    if not st.session_state.auth_validated:
-        if auth_error := validate_auth(
-            st.session_state.provider, st.session_state.api_key
-        ):
-            st.warning(f"Please resolve the following auth issue:\n\n{auth_error}")
-            return
-        else:
-            st.session_state.auth_validated = True
 
-    chat, http_logs = st.tabs(["Chat", "HTTP Exchange Logs"])
-    new_message = st.chat_input(
-        "Type a message to send to Claude to control the computer..."
-    )
+def apply_custom_css():
+    """Apply custom CSS styling."""
+    st.markdown("""
+        <style>
+        /* Dark theme enhancements */
+        .stApp {
+            background-color: #0E1117;
+            color: #E0E0E0;
+        }
+        
+        /* Command input styling */
+        .command-input {
+            background-color: #1E1E1E;
+            border-radius: 10px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        
+        .command-input textarea {
+            background-color: #2E2E2E;
+            color: #E0E0E0;
+            font-family: 'Monaco', monospace;
+            border: 1px solid #3E3E3E;
+        }
+        
+        /* Button styling */
+        .stButton > button {
+            background-color: #00cf86;
+            color: #0E1117;
+            font-weight: bold;
+            border-radius: 5px;
+            padding: 0.5rem 2rem;
+            border: none;
+            transition: all 0.3s ease;
+        }
+        
+        .stButton > button:hover {
+            background-color: #00b876;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        
+        /* Success/Error message styling */
+        .success-message {
+            background-color: #1a472a;
+            color: #98ff98;
+            padding: 1rem;
+            border-radius: 5px;
+            border-left: 5px solid #2ecc71;
+            margin: 1rem 0;
+        }
+        
+        .error-message {
+            background-color: #4a1919;
+            color: #ffb3b3;
+            padding: 1rem;
+            border-radius: 5px;
+            border-left: 5px solid #e74c3c;
+            margin: 1rem 0;
+        }
+        
+        /* Help text styling */
+        .help-text {
+            background-color: #1E1E1E;
+            padding: 1rem;
+            border-radius: 5px;
+            margin: 1rem 0;
+            border-left: 5px solid #3498db;
+        }
+        
+        /* Image output styling */
+        .screenshot {
+            border: 2px solid #3E3E3E;
+            border-radius: 5px;
+            margin: 1rem 0;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
-    with chat:
-        # render past chats
-        for message in st.session_state.messages:
-            if isinstance(message["content"], str):
-                _render_message(message["role"], message["content"])
-            elif isinstance(message["content"], list):
-                for block in message["content"]:
-                    # the tool result we send back to the Anthropic API isn't sufficient to render all details,
-                    # so we store the tool use responses
-                    if isinstance(block, dict) and block["type"] == "tool_result":
-                        _render_message(
-                            Sender.TOOL, st.session_state.tools[block["tool_use_id"]]
-                        )
-                    else:
-                        _render_message(
-                            message["role"],
-                            cast(BetaTextBlock | BetaToolUseBlock, block),
-                        )
 
-        # render past http exchanges
-        for identity, response in st.session_state.responses.items():
-            _render_api_response(response, identity, http_logs)
+def render_help():
+    """Render help section with example commands."""
+    st.markdown("""
+        <div class="help-text">
+        <h3>📝 Example Commands</h3>
+        <ul>
+            <li><code>open safari and take a screenshot</code> - Opens Safari and captures the screen</li>
+            <li><code>take a screenshot</code> - Captures the current screen</li>
+            <li><code>ls -la</code> - Lists files in the current directory</li>
+            <li><code>pwd</code> - Shows current working directory</li>
+        </ul>
+        <p><em>Tip: You can combine multiple commands using "and"</em></p>
+        </div>
+    """, unsafe_allow_html=True)
 
-        # render past chats
-        if new_message:
-            st.session_state.messages.append(
-                {
-                    "role": Sender.USER,
-                    "content": [TextBlock(type="text", text=new_message)],
-                }
-            )
-            _render_message(Sender.USER, new_message)
 
+def main():
+    """Main application entry point."""
+    # Apply custom styling
+    apply_custom_css()
+    
+    # Initialize session state
+    init_session_state()
+    
+    # Initialize session components
+    if not st.session_state.initialized:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            most_recent_message = st.session_state["messages"][-1]
-        except IndexError:
-            return
-
-        if most_recent_message["role"] is not Sender.USER:
-            # we don't have a user message to respond to, exit early
-            return
-
-        with st.spinner("Running Agent..."):
-            # run the agent sampling loop with the newest message
-            st.session_state.messages = await sampling_loop(
-                system_prompt_suffix=st.session_state.custom_system_prompt,
-                model=st.session_state.model,
-                provider=st.session_state.provider,
-                messages=st.session_state.messages,
-                output_callback=partial(_render_message, Sender.BOT),
-                tool_output_callback=partial(
-                    _tool_output_callback, tool_state=st.session_state.tools
-                ),
-                api_response_callback=partial(
-                    _api_response_callback,
-                    tab=http_logs,
-                    response_state=st.session_state.responses,
-                ),
-                api_key=st.session_state.api_key,
-                only_n_most_recent_images=st.session_state.only_n_most_recent_images,
-            )
-
-
-def validate_auth(provider: APIProvider, api_key: str | None):
-    if provider == APIProvider.ANTHROPIC:
-        if not api_key:
-            return "Enter your Anthropic API key in the sidebar to continue."
-    if provider == APIProvider.BEDROCK:
-        import boto3
-
-        if not boto3.Session().get_credentials():
-            return "You must have AWS credentials set up to use the Bedrock API."
-    if provider == APIProvider.VERTEX:
-        import google.auth
-        from google.auth.exceptions import DefaultCredentialsError
-
-        if not os.environ.get("CLOUD_ML_REGION"):
-            return "Set the CLOUD_ML_REGION environment variable to use the Vertex API."
-        try:
-            google.auth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-        except DefaultCredentialsError:
-            return "Your google cloud credentials are not set up correctly."
-
-
-def load_from_storage(filename: str) -> str | None:
-    """Load data from a file in the storage directory."""
-    try:
-        file_path = CONFIG_DIR / filename
-        if file_path.exists():
-            data = file_path.read_text().strip()
-            if data:
-                return data
-    except Exception as e:
-        st.write(f"Debug: Error loading {filename}: {e}")
-    return None
-
-
-def save_to_storage(filename: str, data: str) -> None:
-    """Save data to a file in the storage directory."""
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        file_path = CONFIG_DIR / filename
-        file_path.write_text(data)
-        # Ensure only user can read/write the file
-        file_path.chmod(0o600)
-    except Exception as e:
-        st.write(f"Debug: Error saving {filename}: {e}")
-
-
-def _api_response_callback(
-    response: APIResponse[BetaMessage],
-    tab: DeltaGenerator,
-    response_state: dict[str, APIResponse[BetaMessage]],
-):
-    """
-    Handle an API response by storing it to state and rendering it.
-    """
-    response_id = datetime.now().isoformat()
-    response_state[response_id] = response
-    _render_api_response(response, response_id, tab)
-
-
-def _tool_output_callback(
-    tool_output: ToolResult, tool_id: str, tool_state: dict[str, ToolResult]
-):
-    """Handle a tool output by storing it to state and rendering it."""
-    tool_state[tool_id] = tool_output
-    _render_message(Sender.TOOL, tool_output)
-
-
-def _render_api_response(
-    response: APIResponse[BetaMessage], response_id: str, tab: DeltaGenerator
-):
-    """Render an API response to a streamlit tab"""
-    with tab:
-        with st.expander(f"Request/Response ({response_id})"):
-            newline = "\n\n"
-            st.markdown(
-                f"`{response.http_request.method} {response.http_request.url}`{newline}{newline.join(f'`{k}: {v}`' for k, v in response.http_request.headers.items())}"
-            )
-            st.json(response.http_request.read().decode())
-            st.markdown(
-                f"`{response.http_response.status_code}`{newline}{newline.join(f'`{k}: {v}`' for k, v in response.headers.items())}"
-            )
-            st.json(response.http_response.text)
-
-
-def _render_message(
-    sender: Sender,
-    message: str | BetaTextBlock | BetaToolUseBlock | ToolResult,
-):
-    """Convert input from the user or output from the agent to a streamlit message."""
-    # streamlit's hotreloading breaks isinstance checks, so we need to check for class names
-    is_tool_result = not isinstance(message, str) and (
-        isinstance(message, ToolResult)
-        or message.__class__.__name__ == "ToolResult"
-        or message.__class__.__name__ == "CLIResult"
+            loop.run_until_complete(initialize_session())
+        finally:
+            loop.close()
+    
+    # Render sidebar
+    render_sidebar()
+    
+    # Render productivity sidebar
+    render_productivity_sidebar()
+    
+    # Render cursor controls
+    render_cursor_controls()
+    
+    # Main content
+    st.title("💻 Computer Use")
+    st.markdown("""
+        Control your computer using natural language commands. 
+        Type your command below and press Execute.
+    """)
+    
+    # Command input section
+    st.markdown('<div class="command-input">', unsafe_allow_html=True)
+    command = st.text_area(
+        "Enter your command:",
+        height=100,
+        placeholder="Example: open safari and take a screenshot"
     )
-    if not message or (
-        is_tool_result
-        and st.session_state.hide_images
-        and not hasattr(message, "error")
-        and not hasattr(message, "output")
-    ):
-        return
-    with st.chat_message(sender):
-        if is_tool_result:
-            message = cast(ToolResult, message)
-            if message.output:
-                if message.__class__.__name__ == "CLIResult":
-                    st.code(message.output)
+    
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        execute = st.button("⚡ Execute", use_container_width=True)
+    with col2:
+        if st.button("❓ Show Examples", use_container_width=True):
+            render_help()
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    if execute:
+        if not command:
+            st.markdown(
+                '<div class="error-message">⚠️ Please enter a command.</div>',
+                unsafe_allow_html=True
+            )
+            return
+            
+        if not st.session_state.initialized:
+            st.markdown(
+                '<div class="error-message">⚠️ Session not initialized. Please wait...</div>',
+                unsafe_allow_html=True
+            )
+            return
+            
+        try:
+            # Execute command asynchronously
+            with st.spinner("🔄 Executing command..."):
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(
+                        st.session_state.tools.execute("ComputerTool", command)
+                    )
+                finally:
+                    loop.close()
+                
+                if not result:
+                    st.markdown(
+                        '<div class="error-message">❌ Command execution failed</div>',
+                        unsafe_allow_html=True
+                    )
+                    return
+                    
+                if result.error:
+                    st.markdown(
+                        f'<div class="error-message">❌ {result.error}</div>',
+                        unsafe_allow_html=True
+                    )
                 else:
-                    st.markdown(message.output)
-            if message.error:
-                st.error(message.error)
-            if message.base64_image and not st.session_state.hide_images:
-                st.image(base64.b64decode(message.base64_image))
-        elif isinstance(message, BetaTextBlock) or isinstance(message, TextBlock):
-            st.write(message.text)
-        elif isinstance(message, BetaToolUseBlock) or isinstance(message, ToolUseBlock):
-            st.code(f"Tool Use: {message.name}\nInput: {message.input}")
-        else:
-            st.markdown(message)
+                    st.markdown(
+                        '<div class="success-message">✅ Command executed successfully!</div>',
+                        unsafe_allow_html=True
+                    )
+                    if result.output:
+                        st.code(result.output, language="bash")
+                    if result.base64_image:
+                        try:
+                            import base64
+                            import io
+                            from PIL import Image
+                            
+                            # Decode base64 string to image
+                            img_data = base64.b64decode(result.base64_image)
+                            img = Image.open(io.BytesIO(img_data))
+                            
+                            st.markdown('<div class="screenshot">', unsafe_allow_html=True)
+                            st.image(img)
+                            st.markdown('</div>', unsafe_allow_html=True)
+                        except Exception as e:
+                            st.error(f"Error displaying image: {str(e)}")
+                        
+        except KeyboardInterrupt:
+            st.warning("Operation cancelled by user")
+            return
+        except Exception as e:
+            logger.error(f"Failed to execute command: {e}")
+            st.markdown(
+                f'<div class="error-message">❌ An error occurred: {str(e)}</div>',
+                unsafe_allow_html=True
+            )
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        main()
+    except KeyboardInterrupt:
+        st.warning("Application shutting down...")
+    except Exception as e:
+        st.error(f"Application error: {str(e)}")

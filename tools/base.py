@@ -1,40 +1,28 @@
+"""Base classes for tools."""
+
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, fields, replace
-from typing import Any
-
+from typing import Any, Dict, Optional
+import asyncio
 from anthropic.types.beta import BetaToolUnionParam
 
 
-class BaseAnthropicTool(metaclass=ABCMeta):
-    """Abstract base class for Anthropic-defined tools."""
-
-    @abstractmethod
-    def __call__(self, **kwargs) -> Any:
-        """Executes the tool with the given arguments."""
-        ...
-
-    @abstractmethod
-    def to_params(
-        self,
-    ) -> BetaToolUnionParam:
-        raise NotImplementedError
-
-
-@dataclass(kw_only=True, frozen=True)
+@dataclass(frozen=True)
 class ToolResult:
-    """Represents the result of a tool execution."""
-
-    output: str | None = None
-    error: str | None = None
-    base64_image: str | None = None
-    system: str | None = None
+    """Result of a tool execution"""
+    output: Optional[str] = None
+    error: Optional[str] = None
+    base64_image: Optional[str] = None
+    system: Optional[str] = None
 
     def __bool__(self):
         return any(getattr(self, field.name) for field in fields(self))
 
     def __add__(self, other: "ToolResult"):
         def combine_fields(
-            field: str | None, other_field: str | None, concatenate: bool = True
+            field: Optional[str], 
+            other_field: Optional[str], 
+            concatenate: bool = True
         ):
             if field and other_field:
                 if concatenate:
@@ -55,15 +43,32 @@ class ToolResult:
 
 
 class CLIResult(ToolResult):
-    """A ToolResult that can be rendered as a CLI output."""
+    """A ToolResult that represents CLI output."""
+
+
+class ToolError(Exception):
+    """Raised when a tool encounters an error."""
+    def __init__(self, message: str):
+        self.message = message
 
 
 class ToolFailure(ToolResult):
     """A ToolResult that represents a failure."""
 
 
-class ToolError(Exception):
-    """Raised when a tool encounters an error."""
+class BaseAnthropicTool(metaclass=ABCMeta):
+    """Base class for Anthropic-defined tools."""
 
-    def __init__(self, message):
-        self.message = message
+    def __init__(self):
+        """Initialize the tool."""
+        super().__init__()
+
+    @abstractmethod
+    async def __call__(self, **kwargs) -> ToolResult:
+        """Execute the tool with given arguments."""
+        ...
+
+    @abstractmethod
+    def to_params(self) -> BetaToolUnionParam:
+        """Convert tool to API parameters."""
+        raise NotImplementedError

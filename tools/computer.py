@@ -6,13 +6,19 @@ import pyautogui
 import keyboard
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, Optional, Dict, Any
 from uuid import uuid4
+from loguru import logger
 
-from anthropic.types.beta import BetaToolComputerUse20241022Param
-
-from .base import BaseAnthropicTool, ToolError, ToolResult
+from .base_tool import BaseTool, ToolResult
 from .run import run
+from .accessibility_integration import AccessibilityIntegration
+from .activity_monitor import ActivityMonitor
+from .sidecar import SidecarManager
+from .cursor_integration import CursorIntegration
+from .config_manager import ConfigManager
+from .performance_monitor import PerformanceMonitor
+from .cache_manager import CacheManager
 
 OUTPUT_DIR = "/tmp/outputs"
 
@@ -22,7 +28,7 @@ TYPING_GROUP_SIZE = 50
 Action = Literal[
     "key",
     "type",
-    "mouse_move",
+    "mouse_move", 
     "left_click",
     "left_click_drag",
     "right_click",
@@ -30,6 +36,12 @@ Action = Literal[
     "double_click",
     "screenshot",
     "cursor_position",
+    "open_app",  # Enhanced action
+    "get_window_info",  # Enhanced action
+    "monitor_activity",  # Enhanced action
+    "sidecar_list",  # List available iPads
+    "sidecar_connect",  # Connect to iPad
+    "sidecar_configure",  # Configure Sidecar display
 ]
 
 
@@ -38,8 +50,7 @@ class Resolution(TypedDict):
     height: int
 
 
-# sizes above XGA/WXGA are not recommended (see README.md)
-# scale down to one of these targets if ComputerTool._scaling_enabled is set
+# sizes above XGA/WXGA are not recommended
 MAX_SCALING_TARGETS: dict[str, Resolution] = {
     "XGA": Resolution(width=1024, height=768),  # 4:3
     "WXGA": Resolution(width=1280, height=800),  # 16:10
@@ -53,229 +64,183 @@ class ScalingSource(StrEnum):
     API = "api"
 
 
-class ComputerToolOptions(TypedDict):
-    display_height_px: int
-    display_width_px: int
-    display_number: int | None
-
-
-def chunks(s: str, chunk_size: int) -> list[str]:
-    return [s[i : i + chunk_size] for i in range(0, len(s), chunk_size)]
-
-
-class ComputerTool(BaseAnthropicTool):
-    """
-    A tool that allows the agent to interact with the screen, keyboard, and mouse of the current macOS computer.
-    The tool parameters are defined by Anthropic and are not editable.
-    Requires cliclick to be installed: brew install cliclick
-    """
-
-    name: Literal["computer"] = "computer"
-    api_type: Literal["computer_20241022"] = "computer_20241022"
-    width: int
-    height: int
-    display_num: int | None
-
-    _screenshot_delay = 1.0  # macOS is generally faster than X11
-    _scaling_enabled = True
-
-    @property
-    def options(self) -> ComputerToolOptions:
-        return {
-            "display_width_px": self.width,
-            "display_height_px": self.height,
-            "display_number": self.display_num,
-        }
-
-    def to_params(self) -> BetaToolComputerUse20241022Param:
-        return {"name": self.name, "type": self.api_type, **self.options}
+class ComputerTool(BaseTool):
+    """Enhanced tool for native macOS computer control"""
 
     def __init__(self):
         super().__init__()
-
         self.width, self.height = pyautogui.size()
-        assert self.width and self.height, "WIDTH, HEIGHT must be set"
         self.display_num = None  # macOS doesn't use X11 display numbers
-
-    async def __call__(
-        self,
-        *,
-        action: Action,
-        text: str | None = None,
-        coordinate: tuple[int, int] | None = None,
-        **kwargs,
-    ):
-        print("Action: ", action, text, coordinate)
-        if action in ("mouse_move", "left_click_drag"):
-            if coordinate is None:
-                raise ToolError(f"coordinate is required for {action}")
-            if text is not None:
-                raise ToolError(f"text is not accepted for {action}")
-            if not isinstance(coordinate, list) or len(coordinate) != 2:
-                raise ToolError(f"{coordinate} must be a tuple of length 2")
-            if not all(isinstance(i, int) and i >= 0 for i in coordinate):
-                raise ToolError(f"{coordinate} must be a tuple of non-negative ints")
-
-            x, y = self.scale_coordinates(ScalingSource.API, coordinate[0], coordinate[1])
-
-            if action == "mouse_move":
-                return await self.shell(f"cliclick m:{x},{y}")
-            elif action == "left_click_drag":
-                return await self.shell(f"cliclick dd:{x},{y}")
-
-        if action in ("key", "type"):
-            if text is None:
-                raise ToolError(f"text is required for {action}")
-            if coordinate is not None:
-                raise ToolError(f"coordinate is not accepted for {action}")
-            if not isinstance(text, str):
-                raise ToolError(output=f"{text} must be a string")
-
-            if action == "key":
-                # Convert common key names to pyautogui format
-                key_map = {
-                    "Return": "enter",
-                    "space": "space",
-                    "Tab": "tab",
-                    "Left": "left",
-                    "Right": "right",
-                    "Up": "up",
-                    "Down": "down",
-                    "Escape": "esc",
-                    "command": "command",
-                    "cmd": "command",
-                    "alt": "alt",
-                    "shift": "shift",
-                    "ctrl": "ctrl"
-                }
-
-                try:
-                    if "+" in text:
-                        # Handle combinations like "ctrl+c"
-                        keys = text.split("+")
-                        mapped_keys = [key_map.get(k.strip(), k.strip()) for k in keys]
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, keyboard.press_and_release, '+'.join(mapped_keys)
-                        )
-                    else:
-                        # Handle single keys
-                        mapped_key = key_map.get(text, text)
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, keyboard.press_and_release, mapped_key
-                        )
-
-                    return ToolResult(output=f"Pressed key: {text}", error=None, base64_image=None)
-
-                except Exception as e:
-                    return ToolResult(output=None, error=str(e), base64_image=None)
-            elif action == "type":
-                results: list[ToolResult] = []
-                for chunk in chunks(text, TYPING_GROUP_SIZE):
-                    cmd = f"cliclick w:{TYPING_DELAY_MS} t:{shlex.quote(chunk)}"
-                    results.append(await self.shell(cmd, take_screenshot=False))
-                screenshot_base64 = (await self.screenshot()).base64_image
-                return ToolResult(
-                    output="".join(result.output or "" for result in results),
-                    error="".join(result.error or "" for result in results),
-                    base64_image=screenshot_base64,
-                )
-
-        if action in (
-            "left_click",
-            "right_click",
-            "double_click",
-            "middle_click",
-            "screenshot",
-            "cursor_position",
-        ):
-            if text is not None:
-                raise ToolError(f"text is not accepted for {action}")
-            if coordinate is not None:
-                raise ToolError(f"coordinate is not accepted for {action}")
-
+        self.accessibility = AccessibilityIntegration()
+        self.activity_monitor = ActivityMonitor()
+        self.sidecar = SidecarManager()
+        self.cursor = CursorIntegration()
+        self.config = ConfigManager()
+        self.performance = PerformanceMonitor()
+        self.cache = CacheManager()
+        
+        # Configure from settings
+        if self.config.config.cache_enabled:
+            self._setup_caching()
+            
+    def _setup_caching(self):
+        """Setup caching configuration"""
+        # Configure cache settings
+        pass
+        
+    async def execute(self, command: str, **kwargs) -> ToolResult:
+        """Execute computer control actions"""
+        try:
+            # Parse command into action and parameters
+            parts = command.split()
+            action = parts[0].lower()
+            
+            if action == "open":
+                app_name = " ".join(parts[1:])
+                return await self._open_application(app_name)
+                
             if action == "screenshot":
                 return await self.screenshot()
-            elif action == "cursor_position":
-                result = await self.shell(
-                    "cliclick p",
-                    take_screenshot=False,
-                )
-                import pdb; pdb.set_trace()
-                if result.output:
-                    x, y = map(int, result.output.strip().split(","))
-                    x, y = self.scale_coordinates(ScalingSource.COMPUTER, x, y)
-                    return result.replace(output=f"X={x},Y={y}")
-                return result
+                
+            if action == "click":
+                x = int(parts[1])
+                y = int(parts[2])
+                return await self._handle_mouse_movement("left_click", (x, y))
+                
+            if action == "type":
+                text = " ".join(parts[1:])
+                return await self._handle_keyboard_input("type", text)
+                
+            if action == "press":
+                key = parts[1]
+                return await self._handle_keyboard_input("key", key)
+                
+            raise ValueError(f"Invalid action: {action}")
+            
+        except Exception as e:
+            logger.error(f"Failed to execute action: {e}")
+            return ToolResult(success=False, error=str(e))
+
+    async def _handle_mouse_movement(
+        self, action: Action, coordinate: tuple[int, int] | None
+    ) -> ToolResult:
+        """Handle mouse movement actions"""
+        try:
+            if coordinate is None:
+                raise ValueError(f"coordinate is required for {action}")
+                
+            x, y = coordinate
+            pyautogui.moveTo(x, y)
+            
+            if action == "left_click":
+                pyautogui.click()
+                
+            return ToolResult(success=True)
+            
+        except Exception as e:
+            return ToolResult(success=False, error=str(e))
+
+    async def _handle_keyboard_input(
+        self, action: Action, text: str | None
+    ) -> ToolResult:
+        """Handle keyboard input actions"""
+        try:
+            if text is None:
+                raise ValueError(f"text is required for {action}")
+                
+            if action == "key":
+                keyboard.press_and_release(text)
             else:
-                click_cmd = {
-                    "left_click": "c:.",
-                    "right_click": "rc:.",
-                    "middle_click": "mc:.",
-                    "double_click": "dc:.",
-                }[action]
-                return await self.shell(f"cliclick {click_cmd}")
+                keyboard.write(text)
+                
+            return ToolResult(success=True)
+            
+        except Exception as e:
+            return ToolResult(success=False, error=str(e))
 
-        raise ToolError(f"Invalid action: {action}")
-
-    async def screenshot(self):
-        """Take a screenshot of the current screen and return the base64 encoded image."""
-        output_dir = Path(OUTPUT_DIR)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        path = output_dir / f"screenshot_{uuid4().hex}.png"
-
-        # Use macOS native screencapture
-        screenshot_cmd = f"screencapture -x {path}"
-        result = await self.shell(screenshot_cmd, take_screenshot=False)
-
-        if self._scaling_enabled:
-            x, y = SCALE_DESTINATION['width'], SCALE_DESTINATION['height']
-            await self.shell(
-                f"sips -z {y} {x} {path}",  # sips is macOS native image processor
-                take_screenshot=False
+    async def _open_application(self, app_name: str) -> ToolResult:
+        """Open macOS application"""
+        try:
+            # Clean up app name
+            app_name = app_name.strip()
+            
+            # Try to open the app using AppleScript first
+            script = f'tell application "{app_name}" to activate'
+            proc = await asyncio.create_subprocess_shell(
+                f'osascript -e \'{script}\'',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            
+            if proc.returncode != 0:
+                # Fallback to open command
+                proc = await asyncio.create_subprocess_shell(
+                    f'open -a "{app_name}"',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await proc.communicate()
+                
+            if proc.returncode != 0:
+                return ToolResult(
+                    success=False,
+                    error=f"Failed to open {app_name}: {stderr.decode()}"
+                )
+                
+            # Wait for app to launch
+            await asyncio.sleep(2)
+            
+            return ToolResult(
+                success=True,
+                output=f"Opened {app_name}"
+            )
+            
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                error=f"Error opening {app_name}: {str(e)}"
             )
 
-        if path.exists():
-            return result.replace(
-                base64_image=base64.b64encode(path.read_bytes()).decode()
+    async def screenshot(self) -> ToolResult:
+        """Take a screenshot"""
+        try:
+            # Create output directory if it doesn't exist
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            
+            # Generate unique filename
+            filename = f"{OUTPUT_DIR}/screenshot_{uuid4().hex}.png"
+            
+            # Take screenshot
+            screenshot = pyautogui.screenshot()
+            screenshot.save(filename)
+            
+            # Convert to base64
+            with open(filename, "rb") as f:
+                image_data = base64.b64encode(f.read()).decode()
+                
+            # Cleanup
+            os.remove(filename)
+            
+            return ToolResult(
+                success=True,
+                base64_image=image_data
             )
-        raise ToolError(f"Failed to take screenshot: {result.error}")
+            
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                error=f"Screenshot failed: {str(e)}"
+            )
 
-    async def shell(self, command: str, take_screenshot=False) -> ToolResult:
-        """Run a shell command and return the output, error, and optionally a screenshot."""
-        _, stdout, stderr = await run(command)
-        base64_image = None
-
-        if take_screenshot:
-            # delay to let things settle before taking a screenshot
-            await asyncio.sleep(self._screenshot_delay)
-            base64_image = (await self.screenshot()).base64_image
-
-        return ToolResult(output=stdout, error=stderr, base64_image=base64_image)
-
-    def scale_coordinates(self, source: ScalingSource, x: int, y: int) -> tuple[int, int]:
-        """
-        Scale coordinates between original resolution and target resolution (SCALE_DESTINATION).
-
-        Args:
-            source: ScalingSource.API for scaling up from SCALE_DESTINATION to original resolution
-                   or ScalingSource.COMPUTER for scaling down from original to SCALE_DESTINATION
-            x, y: Coordinates to scale
-
-        Returns:
-            Tuple of scaled (x, y) coordinates
-        """
-        if not self._scaling_enabled:
-            return x, y
-
-        # Calculate scaling factors
-        x_scaling_factor = SCALE_DESTINATION['width'] / self.width
-        y_scaling_factor = SCALE_DESTINATION['height'] / self.height
-
-        if source == ScalingSource.API:
-            # Scale up from SCALE_DESTINATION to original resolution
-            if x > SCALE_DESTINATION['width'] or y > SCALE_DESTINATION['height']:
-                raise ToolError(f"Coordinates {x}, {y} are out of bounds for {SCALE_DESTINATION['width']}x{SCALE_DESTINATION['height']}")
-            return round(x / x_scaling_factor), round(y / y_scaling_factor)
-        else:
-            # Scale down from original resolution to SCALE_DESTINATION
-            return round(x * x_scaling_factor), round(y * y_scaling_factor)
+    async def cleanup(self):
+        """Cleanup resources"""
+        try:
+            if hasattr(self, "activity_monitor"):
+                await self.activity_monitor.cleanup()
+            if hasattr(self, "sidecar"):
+                await self.sidecar.cleanup()
+            if hasattr(self, "cursor"):
+                await self.cursor.cleanup()
+        except Exception as e:
+            logger.error(f"Error cleaning up ComputerTool: {e}")

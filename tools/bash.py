@@ -1,144 +1,118 @@
 import asyncio
 import os
-from typing import ClassVar, Literal
+import pty
+import select
+import subprocess
+import termios
+import tty
+from typing import Optional
 
-from anthropic.types.beta import BetaToolBash20241022Param
+from loguru import logger
 
-from .base import BaseAnthropicTool, CLIResult, ToolError, ToolResult
+from .base_tool import BaseTool, ToolResult
 
 
-class _BashSession:
-    """A session of a bash shell."""
-
-    _started: bool
-    _process: asyncio.subprocess.Process
-
-    command: str = "/bin/bash"
-    _output_delay: float = 0.2  # seconds
-    _timeout: float = 120.0  # seconds
-    _sentinel: str = "<<exit>>"
+class BashTool(BaseTool):
+    """Execute bash commands in an interactive shell."""
 
     def __init__(self):
-        self._started = False
-        self._timed_out = False
-
-    async def start(self):
-        if self._started:
-            return
-
-        self._process = await asyncio.create_subprocess_shell(
-            self.command,
-            preexec_fn=os.setsid,
-            shell=True,
-            bufsize=0,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        self._started = True
-
-    def stop(self):
-        """Terminate the bash shell."""
-        if not self._started:
-            raise ToolError("Session has not started.")
-        if self._process.returncode is not None:
-            return
-        self._process.terminate()
-
-    async def run(self, command: str):
-        """Execute a command in the bash shell."""
-        if not self._started:
-            raise ToolError("Session has not started.")
-        if self._process.returncode is not None:
-            return ToolResult(
-                system="tool must be restarted",
-                error=f"bash has exited with returncode {self._process.returncode}",
-            )
-        if self._timed_out:
-            raise ToolError(
-                f"timed out: bash has not returned in {self._timeout} seconds and must be restarted",
-            )
-
-        # we know these are not None because we created the process with PIPEs
-        assert self._process.stdin
-        assert self._process.stdout
-        assert self._process.stderr
-
-        # send command to the process
-        self._process.stdin.write(
-            command.encode() + f"; echo '{self._sentinel}'\n".encode()
-        )
-        await self._process.stdin.drain()
-
-        # read output from the process, until the sentinel is found
-        try:
-            async with asyncio.timeout(self._timeout):
-                while True:
-                    await asyncio.sleep(self._output_delay)
-                    # if we read directly from stdout/stderr, it will wait forever for
-                    # EOF. use the StreamReader buffer directly instead.
-                    output = self._process.stdout._buffer.decode()  # pyright: ignore[reportAttributeAccessIssue]
-                    if self._sentinel in output:
-                        # strip the sentinel and break
-                        output = output[: output.index(self._sentinel)]
-                        break
-        except asyncio.TimeoutError:
-            self._timed_out = True
-            raise ToolError(
-                f"timed out: bash has not returned in {self._timeout} seconds and must be restarted",
-            ) from None
-
-        if output.endswith("\n"):
-            output = output[:-1]
-
-        error = self._process.stderr._buffer.decode()  # pyright: ignore[reportAttributeAccessIssue]
-        if error.endswith("\n"):
-            error = error[:-1]
-
-        # clear the buffers so that the next output can be read correctly
-        self._process.stdout._buffer.clear()  # pyright: ignore[reportAttributeAccessIssue]
-        self._process.stderr._buffer.clear()  # pyright: ignore[reportAttributeAccessIssue]
-
-        return CLIResult(output=output, error=error)
-
-
-class BashTool(BaseAnthropicTool):
-    """
-    A tool that allows the agent to run bash commands.
-    The tool parameters are defined by Anthropic and are not editable.
-    """
-
-    _session: _BashSession | None
-    name: ClassVar[Literal["bash"]] = "bash"
-    api_type: ClassVar[Literal["bash_20241022"]] = "bash_20241022"
-
-    def __init__(self):
-        self._session = None
         super().__init__()
+        self._process = None
+        self._master_fd = None
+        self._initialize_shell()
 
-    async def __call__(
-        self, command: str | None = None, restart: bool = False, **kwargs
-    ):
-        if restart:
-            if self._session:
-                self._session.stop()
-            self._session = _BashSession()
-            await self._session.start()
+    def _initialize_shell(self):
+        """Initialize interactive shell."""
+        try:
+            # Create pseudo-terminal
+            master_fd, slave_fd = pty.openpty()
+            self._master_fd = master_fd
 
-            return ToolResult(system="tool has been restarted.")
+            # Set terminal attributes
+            tty.setraw(slave_fd)
 
-        if self._session is None:
-            self._session = _BashSession()
-            await self._session.start()
+            # Start zsh process
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            
+            self._process = subprocess.Popen(
+                ["/bin/zsh"],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=env,
+                start_new_session=True,
+                universal_newlines=True
+            )
 
-        if command is not None:
-            return await self._session.run(command)
+            os.close(slave_fd)
 
-        raise ToolError("no command provided.")
+        except Exception as e:
+            logger.error(f"Failed to initialize shell: {e}")
+            raise
 
-    def to_params(self) -> BetaToolBash20241022Param:
-        return {
-            "type": self.api_type,
-            "name": self.name,
-        }
+    async def execute(self, command: str, **kwargs) -> ToolResult:
+        """Execute a bash command."""
+        try:
+            if not self._process or self._process.poll() is not None:
+                self._initialize_shell()
+
+            # Write command to master fd
+            wrapped_command = f"{command}\necho $?\n"
+            os.write(self._master_fd, wrapped_command.encode())
+
+            # Read output asynchronously
+            output = []
+            exit_code = None
+            
+            while True:
+                # Use asyncio.get_event_loop().run_in_executor for blocking operations
+                loop = asyncio.get_event_loop()
+                ready = await loop.run_in_executor(None, lambda: select.select([self._master_fd], [], [], 0.1)[0])
+                
+                if not ready:
+                    break
+                    
+                try:
+                    data = await loop.run_in_executor(None, lambda: os.read(self._master_fd, 1024).decode())
+                    output.append(data)
+                    
+                    # Check for exit code
+                    if data.strip().isdigit():
+                        exit_code = int(data.strip())
+                        break
+                except OSError:
+                    break
+
+            output_str = "".join(output)
+            
+            if exit_code == 0:
+                return ToolResult(success=True, output=output_str)
+            else:
+                return ToolResult(success=False, error=f"Command failed with exit code {exit_code}: {output_str}")
+
+        except Exception as e:
+            logger.error(f"Failed to execute command: {e}")
+            return ToolResult(success=False, error=str(e))
+
+    async def cleanup(self):
+        """Cleanup resources."""
+        try:
+            if self._process and self._process.poll() is None:
+                self._process.terminate()
+                self._process.wait(timeout=1)
+            if self._master_fd is not None:
+                os.close(self._master_fd)
+        except Exception as e:
+            logger.error(f"Error cleaning up BashTool: {e}")
+
+    def __del__(self):
+        """Cleanup resources on deletion."""
+        try:
+            if self._process and self._process.poll() is None:
+                self._process.terminate()
+                self._process.wait(timeout=1)
+            if self._master_fd is not None:
+                os.close(self._master_fd)
+        except Exception as e:
+            logger.error(f"Error cleaning up BashTool: {e}")

@@ -1,0 +1,29 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="computer_use",
+    version="0.1.0",
+    packages=find_packages(),
+    install_requires=[
+        "streamlit>=1.32.0",
+        "anthropic>=0.40.0",
+        "jsonschema>=4.21.1",
+        "python-dotenv>=1.0.1",
+        "loguru>=0.7.2",
+        "keyboard>=0.13.5",
+        "pyautogui>=0.9.54",
+        "psutil>=5.9.0",
+        "watchdog>=3.0.0",
+        "pyobjc-core>=9.2",
+        "pyobjc-framework-Cocoa>=9.2",
+        "pyobjc-framework-Quartz>=9.2",
+        "pyobjc-framework-Vision>=9.2",
+        "pyobjc-framework-ApplicationServices>=9.2",
+        "redis>=5.0.1",
+        "pyperclip>=1.8.2",
+        "pynput>=1.7.6",
+        "schedule>=1.1.0",
+        "customtkinter>=5.2.0",
+        "darkdetect>=0.8.0",
+    ],
+) 

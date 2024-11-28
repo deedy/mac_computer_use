@@ -70,6 +70,16 @@ python -m pip install --upgrade pip
 echo "Installing Python dependencies from requirements.txt..."
 pip install -r requirements.txt
 
+# Install Playwright browsers
+playwright install
+
+# Install Redis
+brew install redis
+brew services start redis
+
+# Install system tray dependencies
+brew install rumps
+
 echo "Setup completed successfully!"
 
 # Create activation script

@@ -23,6 +23,7 @@ from anthropic.types.beta import (
 )
 
 from tools import BashTool, ComputerTool, EditTool, ToolCollection, ToolResult
+from tools.config import settings
 
 BETA_FLAG = "computer-use-2024-10-22"
 
@@ -61,23 +62,25 @@ PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
 # </IMPORTANT>"""
 SYSTEM_PROMPT = f"""<SYSTEM_CAPABILITY>
 * You are utilizing a macOS Sonoma 15.7 environment using {platform.machine()} architecture with command line internet access.
+
 * Package management:
   - Use homebrew for package installation
   - Use curl for HTTP requests
   - Use npm/yarn for Node.js packages
   - Use pip for Python packages
 
-* Browser automation available via Playwright:
-  - Supports Chrome, Firefox, and WebKit
-  - Can handle JavaScript-heavy applications
-  - Capable of screenshots, navigation, and interaction
-  - Handles dynamic content loading
-
 * System automation:
   - cliclick for simulating mouse/keyboard input
   - osascript for AppleScript commands
   - launchctl for managing services
   - defaults for reading/writing system preferences
+
+* Enhanced capabilities:
+  - Native application launching and window management
+  - System performance monitoring and metrics
+  - Accessibility information for UI elements
+  - Window information at cursor coordinates
+  - Process and activity monitoring
 
 * Development tools:
   - Standard Unix/Linux command line utilities
@@ -124,12 +127,7 @@ async def sampling_loop(
         if only_n_most_recent_images:
             _maybe_filter_to_n_most_recent_images(messages, only_n_most_recent_images)
 
-        if provider == APIProvider.ANTHROPIC:
-            client = Anthropic(api_key=api_key)
-        elif provider == APIProvider.VERTEX:
-            client = AnthropicVertex()
-        elif provider == APIProvider.BEDROCK:
-            client = AnthropicBedrock()
+        client = get_client(provider, api_key)
 
         # Call the API
         # we use raw_response to provide debug information to streamlit. Your
@@ -264,3 +262,25 @@ def _maybe_prepend_system_tool_result(result: ToolResult, result_text: str):
     if result.system:
         result_text = f"<system>{result.system}</system>\n{result_text}"
     return result_text
+
+
+def get_client(provider: APIProvider, api_key: str = None) -> Anthropic:
+    """Get API client with regional configuration"""
+    base_url = settings.get_endpoint()
+    
+    if provider == APIProvider.ANTHROPIC:
+        return Anthropic(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=3,
+            timeout=30.0
+        )
+    elif provider == APIProvider.BEDROCK:
+        return AnthropicBedrock(
+            aws_region=settings.API_REGION
+        )
+    elif provider == APIProvider.VERTEX:
+        return AnthropicVertex(
+            project=settings.GCP_PROJECT,
+            location=settings.API_REGION
+        )
