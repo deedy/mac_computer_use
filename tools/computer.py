@@ -167,6 +167,7 @@ class ComputerTool(BaseAnthropicTool):
                     return ToolResult(output=f"Pressed key: {text}", error=None, base64_image=None)
 
                 except Exception as e:
+                    import pdb; pdb.set_trace()
                     return ToolResult(output=None, error=str(e), base64_image=None)
             elif action == "type":
                 results: list[ToolResult] = []

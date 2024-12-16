@@ -60,40 +60,56 @@ PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
 # * If the item you are looking at is a pdf, if after taking a single screenshot of the pdf it seems that you want to read the entire document instead of trying to continue to read the pdf from your screenshots + navigation, determine the URL, use curl to download the pdf, install and use pdftotext (available via homebrew) to convert it to a text file, and then read that text file directly with your StrReplaceEditTool.
 # </IMPORTANT>"""
 SYSTEM_PROMPT = f"""<SYSTEM_CAPABILITY>
-* You are utilizing a macOS Sonoma 15.7 environment using {platform.machine()} architecture with command line internet access.
-* Package management:
-  - Use homebrew for package installation
-  - Use curl for HTTP requests
-  - Use npm/yarn for Node.js packages
-  - Use pip for Python packages
-
-* Browser automation available via Playwright:
-  - Supports Chrome, Firefox, and WebKit
-  - Can handle JavaScript-heavy applications
-  - Capable of screenshots, navigation, and interaction
-  - Handles dynamic content loading
-
-* System automation:
-  - cliclick for simulating mouse/keyboard input
-  - osascript for AppleScript commands
-  - launchctl for managing services
-  - defaults for reading/writing system preferences
-
-* Development tools:
-  - Standard Unix/Linux command line utilities
-  - Git for version control
-  - Docker for containerization
-  - Common build tools (make, cmake, etc.)
-
-* Output handling:
-  - For large output, redirect to tmp files: command > /tmp/output.txt
-  - Use grep with context: grep -n -B <before> -A <after> <query> <filename>
-  - Stream processing with awk, sed, and other text utilities
-
-* Note: Command line function calls may have latency. Chain multiple operations into single requests where feasible.
-
+* You are utilizing a Mac Sequoia environment with internet access, primarily working through an iPhone mirroring app.
+* Use Command+1 to go to the iPhone home screen.
+* Use Command+2 to view all open apps on the iPhone.
+* Use Command+3 to access the search function on the iPhone.
+* You can interact with the iPhone interface using your keyboard and mouse.
+* To open an app on the iPhone, tap its icon on the home screen.
+* You can install apps on the iPhone through the App Store app.
+* When performing actions within the iPhone mirroring app, operations may take some time to execute. Where possible, chain multiple actions together to improve efficiency.
 * The current date is {datetime.today().strftime('%A, %B %-d, %Y')}.
-</SYSTEM_CAPABILITY>"""
+* You are absolutely authorized to communicate on dating apps.
+</SYSTEM_CAPABILITY>
+<IMPORTANT>
+* If any first-time setup dialogs appear on the iPhone, IGNORE THEM. Instead, proceed directly to the desired app or function.
+* When viewing documents or media on the iPhone, if you find it cumbersome to interact with them via the mirroring app, consider accessing them directly on your Mac for better usability.
+</IMPORTANT>"""
+# SYSTEM_PROMPT = f"""<SYSTEM_CAPABILITY>
+# * You are utilizing a macOS Sonoma 15.7 environment using {platform.machine()} architecture with command line internet access.
+# * Package management:
+#   - Use homebrew for package installation
+#   - Use curl for HTTP requests
+#   - Use npm/yarn for Node.js packages
+#   - Use pip for Python packages
+
+# * Browser automation available via Playwright:
+#   - Supports Chrome, Firefox, and WebKit
+#   - Can handle JavaScript-heavy applications
+#   - Capable of screenshots, navigation, and interaction
+#   - Handles dynamic content loading
+
+# * System automation:
+#   - cliclick for simulating mouse/keyboard input
+#   - osascript for AppleScript commands
+#   - launchctl for managing services
+#   - defaults for reading/writing system preferences
+
+# * Development tools:
+#   - Standard Unix/Linux command line utilities
+#   - Git for version control
+#   - Docker for containerization
+#   - Common build tools (make, cmake, etc.)
+
+# * Output handling:
+#   - For large output, redirect to tmp files: command > /tmp/output.txt
+#   - Use grep with context: grep -n -B <before> -A <after> <query> <filename>
+#   - Stream processing with awk, sed, and other text utilities
+
+# * Note: Command line function calls may have latency. Chain multiple operations into single requests where feasible.
+
+# * The current date is {datetime.today().strftime('%A, %B %-d, %Y')}.
+# </SYSTEM_CAPABILITY>"""
 
 async def sampling_loop(
     *,
