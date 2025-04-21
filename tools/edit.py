@@ -1,8 +1,6 @@
 from collections import defaultdict
 from pathlib import Path
-from typing import Literal, get_args
-
-from anthropic.types.beta import BetaToolTextEditor20241022Param
+from typing import Any, Literal, get_args
 
 from .base import BaseAnthropicTool, CLIResult, ToolError, ToolResult
 from .run import maybe_truncate, run
@@ -17,13 +15,13 @@ Command = Literal[
 SNIPPET_LINES: int = 4
 
 
-class EditTool(BaseAnthropicTool):
+class EditTool20250124(BaseAnthropicTool):
     """
     An filesystem editor tool that allows the agent to view, create, and edit files.
     The tool parameters are defined by Anthropic and are not editable.
     """
 
-    api_type: Literal["text_editor_20241022"] = "text_editor_20241022"
+    api_type: Literal["text_editor_20250124"] = "text_editor_20250124"
     name: Literal["str_replace_editor"] = "str_replace_editor"
 
     _file_history: dict[Path, list[str]]
@@ -32,7 +30,7 @@ class EditTool(BaseAnthropicTool):
         self._file_history = defaultdict(list)
         super().__init__()
 
-    def to_params(self) -> BetaToolTextEditor20241022Param:
+    def to_params(self) -> Any:
         return {
             "name": self.name,
             "type": self.api_type,
@@ -55,13 +53,13 @@ class EditTool(BaseAnthropicTool):
         if command == "view":
             return await self.view(_path, view_range)
         elif command == "create":
-            if not file_text:
+            if file_text is None:
                 raise ToolError("Parameter `file_text` is required for command: create")
             self.write_file(_path, file_text)
             self._file_history[_path].append(file_text)
             return ToolResult(output=f"File created successfully at: {_path}")
         elif command == "str_replace":
-            if not old_str:
+            if old_str is None:
                 raise ToolError(
                     "Parameter `old_str` is required for command: str_replace"
                 )
@@ -71,7 +69,7 @@ class EditTool(BaseAnthropicTool):
                 raise ToolError(
                     "Parameter `insert_line` is required for command: insert"
                 )
-            if not new_str:
+            if new_str is None:
                 raise ToolError("Parameter `new_str` is required for command: insert")
             return self.insert(_path, insert_line, new_str)
         elif command == "undo_edit":
@@ -133,15 +131,15 @@ class EditTool(BaseAnthropicTool):
             init_line, final_line = view_range
             if init_line < 1 or init_line > n_lines_file:
                 raise ToolError(
-                    f"Invalid `view_range`: {view_range}. It's first element `{init_line}` should be within the range of lines of the file: {[1, n_lines_file]}"
+                    f"Invalid `view_range`: {view_range}. Its first element `{init_line}` should be within the range of lines of the file: {[1, n_lines_file]}"
                 )
             if final_line > n_lines_file:
                 raise ToolError(
-                    f"Invalid `view_range`: {view_range}. It's second element `{final_line}` should be smaller than the number of lines in the file: `{n_lines_file}`"
+                    f"Invalid `view_range`: {view_range}. Its second element `{final_line}` should be smaller than the number of lines in the file: `{n_lines_file}`"
                 )
             if final_line != -1 and final_line < init_line:
                 raise ToolError(
-                    f"Invalid `view_range`: {view_range}. It's second element `{final_line}` should be larger or equal than its first `{init_line}`"
+                    f"Invalid `view_range`: {view_range}. Its second element `{final_line}` should be larger or equal than its first `{init_line}`"
                 )
 
             if final_line == -1:
@@ -288,3 +286,7 @@ class EditTool(BaseAnthropicTool):
             + file_content
             + "\n"
         )
+
+
+class EditTool20241022(EditTool20250124):
+    api_type: Literal["text_editor_20241022"] = "text_editor_20241022"  # pyright: ignore[reportIncompatibleVariableOverride]

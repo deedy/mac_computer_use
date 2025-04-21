@@ -6,10 +6,10 @@ import pyautogui
 import keyboard
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast, get_args
 from uuid import uuid4
 
-from anthropic.types.beta import BetaToolComputerUse20241022Param
+from anthropic.types.beta import BetaToolComputerUse20241022Param, BetaToolUnionParam
 
 from .base import BaseAnthropicTool, ToolError, ToolResult
 from .run import run
@@ -19,7 +19,7 @@ OUTPUT_DIR = "/tmp/outputs"
 TYPING_DELAY_MS = 12
 TYPING_GROUP_SIZE = 50
 
-Action = Literal[
+Action_20241022 = Literal[
     "key",
     "type",
     "mouse_move",
@@ -31,6 +31,20 @@ Action = Literal[
     "screenshot",
     "cursor_position",
 ]
+
+Action_20250124 = (
+    Action_20241022
+    | Literal[
+        "left_mouse_down",
+        "left_mouse_up",
+        "scroll",
+        "hold_key",
+        "wait",
+        "triple_click",
+    ]
+)
+
+ScrollDirection = Literal["up", "down", "left", "right"]
 
 
 class Resolution(TypedDict):
@@ -46,6 +60,14 @@ MAX_SCALING_TARGETS: dict[str, Resolution] = {
     "FWXGA": Resolution(width=1366, height=768),  # ~16:9
 }
 SCALE_DESTINATION = MAX_SCALING_TARGETS["FWXGA"]
+
+CLICK_BUTTONS = {
+    "left_click": 1,
+    "right_click": 3,
+    "middle_click": 2,
+    "double_click": "--repeat 2 --delay 10 1",
+    "triple_click": "--repeat 3 --delay 10 1",
+}
 
 
 class ScalingSource(StrEnum):
@@ -63,7 +85,7 @@ def chunks(s: str, chunk_size: int) -> list[str]:
     return [s[i : i + chunk_size] for i in range(0, len(s), chunk_size)]
 
 
-class ComputerTool(BaseAnthropicTool):
+class BaseComputerTool:
     """
     A tool that allows the agent to interact with the screen, keyboard, and mouse of the current macOS computer.
     The tool parameters are defined by Anthropic and are not editable.
@@ -71,7 +93,6 @@ class ComputerTool(BaseAnthropicTool):
     """
 
     name: Literal["computer"] = "computer"
-    api_type: Literal["computer_20241022"] = "computer_20241022"
     width: int
     height: int
     display_num: int | None
@@ -81,14 +102,14 @@ class ComputerTool(BaseAnthropicTool):
 
     @property
     def options(self) -> ComputerToolOptions:
+        width, height = self.scale_coordinates(
+            ScalingSource.COMPUTER, self.width, self.height
+        )
         return {
-            "display_width_px": self.width,
-            "display_height_px": self.height,
+            "display_width_px": width,
+            "display_height_px": height,
             "display_number": self.display_num,
         }
-
-    def to_params(self) -> BetaToolComputerUse20241022Param:
-        return {"name": self.name, "type": self.api_type, **self.options}
 
     def __init__(self):
         super().__init__()
@@ -100,7 +121,7 @@ class ComputerTool(BaseAnthropicTool):
     async def __call__(
         self,
         *,
-        action: Action,
+        action: Action_20241022,
         text: str | None = None,
         coordinate: tuple[int, int] | None = None,
         **kwargs,
@@ -279,3 +300,126 @@ class ComputerTool(BaseAnthropicTool):
         else:
             # Scale down from original resolution to SCALE_DESTINATION
             return round(x * x_scaling_factor), round(y * y_scaling_factor)
+
+class ComputerTool20241022(BaseComputerTool, BaseAnthropicTool):
+    api_type: Literal["computer_20241022"] = "computer_20241022"
+
+    def to_params(self) -> BetaToolComputerUse20241022Param:
+        return {"name": self.name, "type": self.api_type, **self.options}
+
+class ComputerTool20250124(BaseComputerTool, BaseAnthropicTool):
+    api_type: Literal["computer_20250124"] = "computer_20250124"
+
+    def to_params(self):
+        return cast(
+            BetaToolUnionParam,
+            {"name": self.name, "type": self.api_type, **self.options},
+        )
+
+    async def __call__(
+        self,
+        *,
+        action: Action_20250124,
+        text: str | None = None,
+        coordinate: tuple[int, int] | None = None,
+        scroll_direction: ScrollDirection | None = None,
+        scroll_amount: int | None = None,
+        duration: int | float | None = None,
+        key: str | None = None,
+        **kwargs,
+    ):
+        if action in ("left_mouse_down", "left_mouse_up"):
+            if coordinate is not None:
+                raise ToolError(f"coordinate is not accepted for {action=}.")
+            click_cmd = {
+                "left_mouse_down": "dd:.",  # Press down
+                "left_mouse_up": "du:.",    # Release up
+            }[action]
+            return await self.shell(f"cliclick {click_cmd}")
+
+        if action == "scroll":
+            if scroll_direction is None or scroll_direction not in get_args(
+                ScrollDirection
+            ):
+                raise ToolError(
+                    f"{scroll_direction=} must be 'up', 'down', 'left', or 'right'"
+                )
+            if not isinstance(scroll_amount, int) or scroll_amount < 0:
+                raise ToolError(f"{scroll_amount=} must be a non-negative int")
+
+            if coordinate is not None:
+                x, y = self.scale_coordinates(ScalingSource.API, coordinate[0], coordinate[1])
+                await self.shell(f"cliclick m:{x},{y}")
+
+            # Map scroll directions to cliclick scroll commands
+            scroll_cmd = {
+                "up": "kp:page-up",
+                "down": "kp:page-down",
+                "left": "kp:arrow-left",
+                "right": "kp:arrow-right"
+            }[scroll_direction]
+
+            commands = []
+            if text:
+                commands.append(f"cliclick kd:{text}")
+            for _ in range(scroll_amount):
+                commands.append(f"cliclick {scroll_cmd}")
+            if text:
+                commands.append(f"cliclick ku:{text}")
+
+            for cmd in commands:
+                await self.shell(cmd)
+            return await self.screenshot()
+
+        if action in ("hold_key", "wait"):
+            if duration is None or not isinstance(duration, (int, float)):
+                raise ToolError(f"{duration=} must be a number")
+            if duration < 0:
+                raise ToolError(f"{duration=} must be non-negative")
+            if duration > 100:
+                raise ToolError(f"{duration=} is too long.")
+
+            if action == "hold_key":
+                if text is None:
+                    raise ToolError(f"text is required for {action}")
+                await self.shell(f"cliclick kd:{text}")
+                await asyncio.sleep(duration)
+                await self.shell(f"cliclick ku:{text}")
+                return await self.screenshot()
+
+            if action == "wait":
+                await asyncio.sleep(duration)
+                return await self.screenshot()
+
+        if action in (
+            "left_click",
+            "right_click",
+            "double_click",
+            "triple_click",
+            "middle_click",
+        ):
+            if text is not None:
+                raise ToolError(f"text is not accepted for {action}")
+
+            if coordinate is not None:
+                x, y = self.scale_coordinates(ScalingSource.API, coordinate[0], coordinate[1])
+                await self.shell(f"cliclick m:{x},{y}")
+
+            click_cmd = {
+                "left_click": "c:.",
+                "right_click": "rc:.",
+                "middle_click": "mc:.",
+                "double_click": "dc:.",
+                "triple_click": "tc:.",  # Note: cliclick may not support triple click natively
+            }[action]
+
+            if key:
+                await self.shell(f"cliclick kd:{key}")
+            result = await self.shell(f"cliclick {click_cmd}")
+            if key:
+                await self.shell(f"cliclick ku:{key}")
+            return result
+
+        return await super().__call__(
+            action=action, text=text, coordinate=coordinate, key=key, **kwargs
+        )
