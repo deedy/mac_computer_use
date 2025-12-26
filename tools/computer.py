@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal, TypedDict
 from uuid import uuid4
 
-from anthropic.types.beta import BetaToolComputerUse20241022Param
+from anthropic.types.beta import BetaToolComputerUse20250124Param
 
 from .base import BaseAnthropicTool, ToolError, ToolResult
 from .run import run
@@ -28,8 +28,14 @@ Action = Literal[
     "right_click",
     "middle_click",
     "double_click",
+    "triple_click",
     "screenshot",
     "cursor_position",
+    "scroll",
+    "hold_key",
+    "wait",
+    "left_mouse_down",
+    "left_mouse_up",
 ]
 
 
@@ -71,7 +77,7 @@ class ComputerTool(BaseAnthropicTool):
     """
 
     name: Literal["computer"] = "computer"
-    api_type: Literal["computer_20241022"] = "computer_20241022"
+    api_type: Literal["computer_20250124"] = "computer_20250124"
     width: int
     height: int
     display_num: int | None
@@ -87,7 +93,7 @@ class ComputerTool(BaseAnthropicTool):
             "display_number": self.display_num,
         }
 
-    def to_params(self) -> BetaToolComputerUse20241022Param:
+    def to_params(self) -> BetaToolComputerUse20250124Param:
         return {"name": self.name, "type": self.api_type, **self.options}
 
     def __init__(self):
@@ -184,9 +190,12 @@ class ComputerTool(BaseAnthropicTool):
             "left_click",
             "right_click",
             "double_click",
+            "triple_click",
             "middle_click",
             "screenshot",
             "cursor_position",
+            "left_mouse_down",
+            "left_mouse_up",
         ):
             if text is not None:
                 raise ToolError(f"text is not accepted for {action}")
@@ -200,20 +209,77 @@ class ComputerTool(BaseAnthropicTool):
                     "cliclick p",
                     take_screenshot=False,
                 )
-                import pdb; pdb.set_trace()
                 if result.output:
                     x, y = map(int, result.output.strip().split(","))
                     x, y = self.scale_coordinates(ScalingSource.COMPUTER, x, y)
                     return result.replace(output=f"X={x},Y={y}")
                 return result
+            elif action == "left_mouse_down":
+                return await self.shell("cliclick kd:.")
+            elif action == "left_mouse_up":
+                return await self.shell("cliclick ku:.")
             else:
                 click_cmd = {
                     "left_click": "c:.",
                     "right_click": "rc:.",
                     "middle_click": "mc:.",
                     "double_click": "dc:.",
+                    "triple_click": "tc:.",
                 }[action]
                 return await self.shell(f"cliclick {click_cmd}")
+
+        # Handle scroll action
+        if action == "scroll":
+            scroll_direction = kwargs.get("scroll_direction")
+            scroll_amount = kwargs.get("scroll_amount", 3)
+            if scroll_direction not in ("up", "down", "left", "right"):
+                raise ToolError("scroll_direction must be one of: up, down, left, right")
+
+            # Use pyautogui for scrolling
+            if scroll_direction in ("up", "down"):
+                scroll_val = scroll_amount if scroll_direction == "up" else -scroll_amount
+                await asyncio.get_event_loop().run_in_executor(
+                    None, pyautogui.scroll, scroll_val
+                )
+            else:  # left or right
+                scroll_val = scroll_amount if scroll_direction == "left" else -scroll_amount
+                await asyncio.get_event_loop().run_in_executor(
+                    None, pyautogui.hscroll, scroll_val
+                )
+            await asyncio.sleep(self._screenshot_delay)
+            return await self.screenshot()
+
+        # Handle hold_key action
+        if action == "hold_key":
+            if text is None:
+                raise ToolError("text (key name) is required for hold_key action")
+            duration = kwargs.get("duration", 1.0)
+            key_map = {
+                "command": "command",
+                "cmd": "command",
+                "alt": "alt",
+                "shift": "shift",
+                "ctrl": "ctrl",
+                "control": "ctrl",
+            }
+            mapped_key = key_map.get(text.lower(), text.lower())
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, keyboard.press, mapped_key
+                )
+                await asyncio.sleep(duration)
+                await asyncio.get_event_loop().run_in_executor(
+                    None, keyboard.release, mapped_key
+                )
+                return ToolResult(output=f"Held key {text} for {duration}s", error=None, base64_image=None)
+            except Exception as e:
+                return ToolResult(output=None, error=str(e), base64_image=None)
+
+        # Handle wait action
+        if action == "wait":
+            duration = kwargs.get("duration", 1.0)
+            await asyncio.sleep(duration)
+            return await self.screenshot()
 
         raise ToolError(f"Invalid action: {action}")
 

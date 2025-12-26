@@ -4,7 +4,26 @@
 
 > [!CAUTION]
 > This comes with obvious risks. The Anthropic agent can control everything on your Mac. Please be careful.
-> Anthropic's new Claude 3.5 Sonnet model refuses to do unsafe things like purchase items or download illegal content.
+> Claude 4 models refuse to do unsafe things like purchase items or download illegal content.
+
+## Supported Models
+
+This project supports all three latest Claude 4.5 model families with computer use capabilities:
+
+| Model | Best For | Model ID |
+|-------|----------|----------|
+| **Claude Opus 4.5** | Complex tasks, highest capability | `claude-opus-4-5-20251101` |
+| **Claude Sonnet 4.5** (default) | Balanced performance & cost | `claude-sonnet-4-5-20250929` |
+| **Claude Haiku 4.5** | Fast responses, cost-effective | `claude-haiku-4-5-20251001` |
+
+Select your preferred model in the sidebar UI. The appropriate beta API and tool versions are automatically configured:
+- Opus 4.5: `computer-use-2025-11-24` (with zoom capability)
+- Sonnet/Haiku 4.5: `computer-use-2025-01-24`
+
+Tool types used:
+- `computer_20250124` - Screen, mouse, and keyboard control
+- `bash_20250124` - Command line execution
+- `text_editor_20250124` - File editing capabilities
 
 ## Features
 
@@ -93,4 +112,6 @@ streamlit run streamlit.py
 ```
 
 > [!IMPORTANT]
-> The Beta API used in this reference implementation is subject to change. Please refer to the [API release notes](https://docs.anthropic.com/en/release-notes/api) for the most up-to-date information.
+> The Beta API used in this reference implementation is subject to change. Please refer to the [API release notes](https://docs.claude.com/en/release-notes/api) for the most up-to-date information.
+>
+> **Updated December 2025**: This project has been updated to use the `computer-use-2025-01-24` beta API with Claude Sonnet 4.5 as the default model.

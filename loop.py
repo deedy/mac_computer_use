@@ -24,7 +24,9 @@ from anthropic.types.beta import (
 
 from tools import BashTool, ComputerTool, EditTool, ToolCollection, ToolResult
 
-BETA_FLAG = "computer-use-2024-10-22"
+# Beta flags for different model versions
+BETA_FLAG_STANDARD = "computer-use-2025-01-24"  # For Sonnet 4.5, Haiku 4.5, Sonnet 4, Opus 4
+BETA_FLAG_OPUS_45 = "computer-use-2025-11-24"   # For Opus 4.5 (with zoom capability)
 
 
 class APIProvider(StrEnum):
@@ -33,11 +35,52 @@ class APIProvider(StrEnum):
     VERTEX = "vertex"
 
 
-PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
-    APIProvider.ANTHROPIC: "claude-3-5-sonnet-20241022",
-    APIProvider.BEDROCK: "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    APIProvider.VERTEX: "claude-3-5-sonnet-v2@20241022",
+class ModelFamily(StrEnum):
+    OPUS = "opus"
+    SONNET = "sonnet"
+    HAIKU = "haiku"
+
+
+# Model configurations for each provider and family
+MODEL_CONFIGS: dict[APIProvider, dict[ModelFamily, str]] = {
+    APIProvider.ANTHROPIC: {
+        ModelFamily.OPUS: "claude-opus-4-5-20251101",
+        ModelFamily.SONNET: "claude-sonnet-4-5-20250929",
+        ModelFamily.HAIKU: "claude-haiku-4-5-20251001",
+    },
+    APIProvider.BEDROCK: {
+        ModelFamily.OPUS: "anthropic.claude-opus-4-5-20251101-v1:0",
+        ModelFamily.SONNET: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        ModelFamily.HAIKU: "anthropic.claude-haiku-4-5-20251001-v1:0",
+    },
+    APIProvider.VERTEX: {
+        ModelFamily.OPUS: "claude-opus-4-5@20251101",
+        ModelFamily.SONNET: "claude-sonnet-4-5@20250929",
+        ModelFamily.HAIKU: "claude-haiku-4-5@20251001",
+    },
 }
+
+# Default model family
+DEFAULT_MODEL_FAMILY = ModelFamily.SONNET
+
+# Legacy mapping for backwards compatibility
+PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
+    provider: MODEL_CONFIGS[provider][DEFAULT_MODEL_FAMILY]
+    for provider in APIProvider
+}
+
+
+def get_model_name(provider: APIProvider, family: ModelFamily) -> str:
+    """Get the model name for a given provider and model family."""
+    return MODEL_CONFIGS[provider][family]
+
+
+def get_beta_flag(model: str) -> str:
+    """Get the appropriate beta flag for a model."""
+    # Opus 4.5 uses a different beta flag with zoom capability
+    if "opus-4-5" in model or "opus-4.5" in model:
+        return BETA_FLAG_OPUS_45
+    return BETA_FLAG_STANDARD
 
 
 # This system prompt is optimized for the Docker environment in this repository and
@@ -135,13 +178,14 @@ async def sampling_loop(
         # we use raw_response to provide debug information to streamlit. Your
         # implementation may be able call the SDK directly with:
         # `response = client.messages.create(...)` instead.
+        beta_flag = get_beta_flag(model)
         raw_response = client.beta.messages.with_raw_response.create(
             max_tokens=max_tokens,
             messages=messages,
             model=model,
             system=system,
             tools=tool_collection.to_params(),
-            betas=[BETA_FLAG],
+            betas=[beta_flag],
         )
 
         api_response_callback(cast(APIResponse[BetaMessage], raw_response))

@@ -23,7 +23,11 @@ from streamlit.delta_generator import DeltaGenerator
 
 from loop import (
     PROVIDER_TO_DEFAULT_MODEL_NAME,
+    MODEL_CONFIGS,
+    DEFAULT_MODEL_FAMILY,
     APIProvider,
+    ModelFamily,
+    get_model_name,
     sampling_loop,
 )
 from tools import ToolResult
@@ -71,6 +75,10 @@ def setup_state():
         )
     if "provider_radio" not in st.session_state:
         st.session_state.provider_radio = st.session_state.provider
+    if "model_family" not in st.session_state:
+        st.session_state.model_family = DEFAULT_MODEL_FAMILY
+    if "model_family_radio" not in st.session_state:
+        st.session_state.model_family_radio = st.session_state.model_family
     if "model" not in st.session_state:
         _reset_model()
     if "auth_validated" not in st.session_state:
@@ -88,9 +96,10 @@ def setup_state():
 
 
 def _reset_model():
-    st.session_state.model = PROVIDER_TO_DEFAULT_MODEL_NAME[
-        cast(APIProvider, st.session_state.provider)
-    ]
+    """Reset model based on current provider and model family."""
+    provider = cast(APIProvider, st.session_state.provider)
+    family = cast(ModelFamily, st.session_state.get("model_family", DEFAULT_MODEL_FAMILY))
+    st.session_state.model = get_model_name(provider, family)
 
 
 async def main():
@@ -107,9 +116,14 @@ async def main():
 
         def _reset_api_provider():
             if st.session_state.provider_radio != st.session_state.provider:
-                _reset_model()
                 st.session_state.provider = st.session_state.provider_radio
                 st.session_state.auth_validated = False
+                _reset_model()
+
+        def _reset_model_family():
+            if st.session_state.model_family_radio != st.session_state.model_family:
+                st.session_state.model_family = st.session_state.model_family_radio
+                _reset_model()
 
         provider_options = [option.value for option in APIProvider]
         st.radio(
@@ -120,7 +134,19 @@ async def main():
             on_change=_reset_api_provider,
         )
 
-        st.text_input("Model", key="model")
+        # Model family selector (Opus, Sonnet, Haiku)
+        model_family_options = [option.value for option in ModelFamily]
+        st.radio(
+            "Model",
+            options=model_family_options,
+            key="model_family_radio",
+            format_func=lambda x: f"Claude {x.title()} 4.5",
+            on_change=_reset_model_family,
+            help="Opus: Most capable | Sonnet: Balanced | Haiku: Fast & affordable",
+        )
+
+        # Show current model ID (read-only display)
+        st.text_input("Model ID", key="model", disabled=True, help="Auto-set based on provider and model family")
 
         if st.session_state.provider == APIProvider.ANTHROPIC:
             st.text_input(
